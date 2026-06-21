@@ -51,6 +51,14 @@ struct DBOptions final {
 	// values produce more frequent, faster flushes; larger values batch more
 	// writes per SST file.
 	uint64_t writeBufferSize = 16ULL * 1024 * 1024; // 16MB
+	// SST point-lookup filter. 0 = no filter (RocksDB default: every get walks
+	// data blocks). 10 ~= 1% false-positive. float (not double): the napi getValue
+	// helper has a float overload, no double one. Promotes to the double the
+	// filter constructors take.
+	float bloomBitsPerKey = 0.0f;
+	// When true and bloomBitsPerKey > 0, use Ribbon filters (built on compaction)
+	// + Bloom (on flush): same FP rate, ~30%% less memory, a bit more build CPU.
+	bool ribbonFilter = false;
 	// Opt-in per-CF flag enabling Verification Table slot locking/tracking for
 	// this column family's writes (see core/verification_table.h).
 	bool verificationTable = false;

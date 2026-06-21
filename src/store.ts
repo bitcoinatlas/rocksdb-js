@@ -163,6 +163,16 @@ export class Store {
 	disableWAL: boolean;
 
 	/**
+	 * SST bloom filter bits per key. 0 = off.
+	 */
+	bloomBitsPerKey?: number;
+
+	/**
+	 * Whether to use Ribbon filters instead of Bloom.
+	 */
+	ribbonFilter?: boolean;
+
+	/**
 	 * Whether to enable RocksDB statistics.
 	 */
 	enableStats: boolean;
@@ -359,6 +369,8 @@ export class Store {
 		this.maxWriteBufferSizeToMaintain = options?.maxWriteBufferSizeToMaintain;
 		this.name = options?.name ?? 'default';
 		this.noBlockCache = options?.noBlockCache;
+		this.bloomBitsPerKey = options?.bloomBitsPerKey;
+		this.ribbonFilter = options?.ribbonFilter;
 		this.parallelismThreads = options?.parallelismThreads;
 		this.path = path;
 		this.pessimistic = options?.pessimistic ?? false;
@@ -833,6 +845,8 @@ export class Store {
 			mode: this.pessimistic ? 'pessimistic' : 'optimistic',
 			name: this.name,
 			noBlockCache: this.noBlockCache,
+			bloomBitsPerKey: this.bloomBitsPerKey,
+			ribbonFilter: this.ribbonFilter,
 			parallelismThreads: this.parallelismThreads,
 			readOnly: this.readOnly,
 			statsLevel: this.statsLevel,

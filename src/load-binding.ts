@@ -193,6 +193,10 @@ export declare class NativeIteratorCls {
 export type NativeDatabaseMode = 'optimistic' | 'pessimistic';
 
 export type NativeDatabaseOptions = {
+	/** SST bloom filter bits per key. 0 (default) = no filter. 10 ~= 1%% FP. */
+	bloomBitsPerKey?: number;
+	/** Use Ribbon filters (less memory, more build CPU). Ignored if bloomBitsPerKey is 0. */
+	ribbonFilter?: boolean;
 	dbWriteBufferSize?: number;
 	disableWAL?: boolean;
 	enableStats?: boolean;

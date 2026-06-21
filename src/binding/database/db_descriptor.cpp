@@ -2,6 +2,7 @@
 #include "database/db_settings.h"
 #include "transaction_log/transaction_log_store_registry.h"
 #include "rocksdb/listener.h"
+#include "rocksdb/filter_policy.h"
 #include <algorithm>
 #include <memory>
 
@@ -681,6 +682,23 @@ std::shared_ptr<DBDescriptor> DBDescriptor::open(const std::string& path, const 
 		tableOptions.no_block_cache = true;
 	} else {
 		tableOptions.block_cache = settings.getBlockCache();
+	}
+
+	// Opt-in SST bloom/ribbon filter for point lookups. Off by default (0) so
+	// behavior is unchanged unless bloomBitsPerKey is set. Filters only attach to
+	// SSTs written AFTER this is enabled, so run a full compaction once to apply
+	// it to existing data.
+	if (options.bloomBitsPerKey > 0.0f) {
+		if (options.ribbonFilter) {
+			tableOptions.filter_policy.reset(rocksdb::NewRibbonFilterPolicy(options.bloomBitsPerKey));
+		} else {
+			tableOptions.filter_policy.reset(rocksdb::NewBloomFilterPolicy(options.bloomBitsPerKey));
+		}
+		// A billion-key DB cannot keep all filters resident, so cache filter+index
+		// blocks and pin L0's; optimize_filters_for_memory trims fragmentation.
+		tableOptions.cache_index_and_filter_blocks = true;
+		tableOptions.pin_l0_filter_and_index_blocks_in_cache = true;
+		tableOptions.optimize_filters_for_memory = true;
 	}
 
 	// set the database options

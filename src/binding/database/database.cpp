@@ -1383,6 +1383,8 @@ napi_value Database::Open(napi_env env, napi_callback_info info) {
 	NAPI_STATUS_THROWS(rocksdb_js::getProperty(env, options, "readOnly", dbHandleOptions.readOnly));
 	NAPI_STATUS_THROWS(rocksdb_js::getProperty(env, options, "parallelismThreads", dbHandleOptions.parallelismThreads));
 	NAPI_STATUS_THROWS(rocksdb_js::getProperty(env, options, "writeBufferSize", dbHandleOptions.writeBufferSize));
+	NAPI_STATUS_THROWS(rocksdb_js::getProperty(env, options, "bloomBitsPerKey", dbHandleOptions.bloomBitsPerKey));
+	NAPI_STATUS_THROWS(rocksdb_js::getProperty(env, options, "ribbonFilter", dbHandleOptions.ribbonFilter));
 	NAPI_STATUS_THROWS(rocksdb_js::getProperty(env, options, "maxWriteBufferNumber", dbHandleOptions.maxWriteBufferNumber));
 	NAPI_STATUS_THROWS(rocksdb_js::getProperty(env, options, "dbWriteBufferSize", dbHandleOptions.dbWriteBufferSize));
 	NAPI_STATUS_THROWS(rocksdb_js::getProperty(env, options, "maxWriteBufferSizeToMaintain", dbHandleOptions.maxWriteBufferSizeToMaintain));
