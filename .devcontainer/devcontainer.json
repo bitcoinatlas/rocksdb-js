@@ -17,5 +17,5 @@
             }
         }
     },
-    "postCreateCommand": "corepack enable && pnpm install --no-frozen-lockfile"
+    "postCreateCommand": "corepack enable && pnpm install --no-frozen-lockfile && pnpm build"
 }
