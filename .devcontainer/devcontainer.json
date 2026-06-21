@@ -1,0 +1,21 @@
+{
+    "name": "rocksdb-js (native binding dev)",
+    "build": {
+        "dockerfile": "Containerfile"
+    },
+
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "oxc.oxc-vscode",
+                "ms-vscode.cpptools",
+                "ms-vscode.cpptools-extension-pack"
+            ],
+            "settings": {
+                "C_Cpp.default.cppStandard": "c++17",
+                "editor.formatOnSave": false
+            }
+        }
+    },
+    "postCreateCommand": "corepack enable && pnpm install --no-frozen-lockfile"
+}

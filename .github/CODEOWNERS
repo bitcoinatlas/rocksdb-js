@@ -1,6 +1,0 @@
-# By default, everything must be reviewed by a core maintainer
-*          @kriszyp @cb1kenobi
-
-# Dependency-only changes don't require kriszyp
-package.json    @cb1kenobi
-pnpm-lock.yaml  @cb1kenobi

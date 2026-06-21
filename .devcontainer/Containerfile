@@ -1,0 +1,32 @@
+# Node 24 satisfies the repo's engines (^22.18.0 || >=24.0.0) and matches CI.
+# The Microsoft devcontainer image gives a non-root `node` user, git, and the
+# usual dev niceties out of the box.
+FROM mcr.microsoft.com/devcontainers/typescript-node:24
+
+# Native-build toolchain for node-gyp + the gtest-based native tests:
+#   - build-essential / python3  -> node-gyp (gypfile: true) compiles the binding
+#   - cmake                      -> scripts/init-gtest builds googletest; also
+#                                   needed if you build RocksDB from source
+#   - the RocksDB lib itself is a PREBUILT static archive pulled from GitHub at
+#     build time and linked statically (deps/rocksdb/lib/librocksdb.a), plus a
+#     bundled libz.a, so no system rocksdb/zlib/snappy/zstd packages are required.
+RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
+	&& apt-get install -y --no-install-recommends \
+		build-essential \
+		python3 \
+		python-is-python3 \
+		cmake \
+		pkg-config \
+		ca-certificates \
+		curl \
+		git \
+	&& apt-get clean \
+	&& rm -rf /var/lib/apt/lists/*
+
+# Activate pnpm via corepack (repo pins no packageManager, so use a recent 10.x).
+RUN corepack enable && corepack prepare pnpm@10.18.0 --activate
+
+# Quality-of-life: larger default ulimit for the stress tests, and make the
+# pnpm store path predictable (matches the named volume mount in devcontainer.json).
+ENV PNPM_HOME="/home/node/.local/share/pnpm"
+ENV PATH="${PNPM_HOME}:${PATH}"
