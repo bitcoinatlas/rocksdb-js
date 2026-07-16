@@ -41,6 +41,15 @@ napi_status getKeyFromProperty(
 	uint32_t& end
 );
 
+// Little-endian u32 read, endian-safe. Used to walk the flat [u32 len][bytes]
+// entry format consumed by the batched put path (putManySync).
+inline uint32_t readLE32(const char* p) {
+	return static_cast<uint32_t>(static_cast<unsigned char>(p[0]))
+		| (static_cast<uint32_t>(static_cast<unsigned char>(p[1])) << 8)
+		| (static_cast<uint32_t>(static_cast<unsigned char>(p[2])) << 16)
+		| (static_cast<uint32_t>(static_cast<unsigned char>(p[3])) << 24);
+}
+
 const char* getNapiBufferFromArg(
 	napi_env env,
 	napi_value arg,

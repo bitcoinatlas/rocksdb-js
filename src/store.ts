@@ -893,6 +893,67 @@ export class Store {
 		context.putSync(this.encodeKey(key), valueBuffer, this.getTxnId(options));
 	}
 
+	/**
+	 * Batched put. Encodes every entry and hands the binding ONE flat
+	 * `[u32 LE length][bytes]` buffer for keys and one for values, so N writes
+	 * cross the native boundary in a single call instead of N. Ordering and
+	 * atomicity match a loop of `putSync()` inside the same transaction.
+	 *
+	 * @param context - The store context.
+	 * @param entries - `[key, value]` pairs to write.
+	 * @param options - The put options (e.g. `transaction`).
+	 */
+	putManySync(context: StoreContext, entries: [Key, any][], options?: StorePutOptions): void {
+		if (!this.db.opened) {
+			throw new Error('Database not open');
+		}
+
+		const count = entries.length;
+		if (count === 0) {
+			return;
+		}
+
+		// encodeKey/encodeValue hand back views into SHARED reusable buffers, so
+		// each encoded result MUST be copied out (by its [start, end) range) before
+		// the next iteration overwrites it — hence the explicit Uint8Array.slice
+		// (a Buffer's own .slice would alias, not copy). Value is encoded before
+		// key, the same shared-buffer ordering rule as putSync().
+		const keyParts: Uint8Array[] = new Array(count);
+		const valueParts: Uint8Array[] = new Array(count);
+		let keysBytes = 0;
+		let valuesBytes = 0;
+
+		for (let i = 0; i < count; i++) {
+			const entry = entries[i]!;
+			const value = copyEncoded(this.encodeValue(entry[1]));
+			const key = copyEncoded(this.encodeKey(entry[0]));
+			keyParts[i] = key;
+			valueParts[i] = value;
+			keysBytes += 4 + key.length;
+			valuesBytes += 4 + value.length;
+		}
+
+		const keysBuf = Buffer.allocUnsafe(keysBytes);
+		const valuesBuf = Buffer.allocUnsafe(valuesBytes);
+		let ko = 0;
+		let vo = 0;
+		for (let i = 0; i < count; i++) {
+			const key = keyParts[i]!;
+			keysBuf.writeUInt32LE(key.length, ko);
+			ko += 4;
+			keysBuf.set(key, ko);
+			ko += key.length;
+
+			const value = valueParts[i]!;
+			valuesBuf.writeUInt32LE(value.length, vo);
+			vo += 4;
+			valuesBuf.set(value, vo);
+			vo += value.length;
+		}
+
+		context.putManySync(keysBuf, valuesBuf, count, this.getTxnId(options));
+	}
+
 	removeSync(context: StoreContext, key: Key, options?: StoreRemoveOptions): void {
 		if (!this.db.opened) {
 			throw new Error('Database not open');
@@ -987,6 +1048,18 @@ export class Store {
  * Ensure that they key has been copied into our shared buffer, and return the ending position
  * @param keyBuffer
  */
+// Copy the meaningful bytes out of an encoded key/value. encodeKey/encodeValue
+// may return a view into a shared reusable buffer bounded by .start/.end (like
+// the shared keyBuffer), so we slice by that range and force a real copy via
+// Uint8Array.prototype.slice (Buffer.prototype.slice would alias the shared
+// buffer, which the next encode call would then overwrite).
+function copyEncoded(b: BufferWithDataView | Uint8Array): Uint8Array {
+	const view = b as Partial<BufferWithDataView> & Uint8Array;
+	const start = typeof view.start === 'number' ? view.start : 0;
+	const end = typeof view.end === 'number' ? view.end : b.length;
+	return Uint8Array.prototype.slice.call(b, start, end);
+}
+
 function getKeyParam(keyBuffer: BufferWithDataView): number | Buffer {
 	if (keyBuffer.buffer === KEY_BUFFER.buffer) {
 		if (keyBuffer.end >= 0) {

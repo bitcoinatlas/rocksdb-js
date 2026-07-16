@@ -438,6 +438,34 @@ export class DBI<T extends DBITransactional | unknown = unknown> {
 	}
 
 	/**
+	 * Batched put: writes many `[key, value]` pairs in a single native call. If a
+	 * transaction is supplied via `options`, every write joins it; ordering and
+	 * atomicity match a sequence of `putSync()` calls.
+	 *
+	 * @param entries - `[key, value]` pairs to store.
+	 * @param options - The put options (e.g. `transaction`).
+	 *
+	 * @example
+	 * ```typescript
+	 * db.putManySync([['a', 1], ['b', 2]], { transaction });
+	 * ```
+	 */
+	putManySync(entries: [Key, any][], options?: PutOptions & T): void {
+		return this.store.putManySync(this._context, entries, options);
+	}
+
+	/**
+	 * Async form of {@link putManySync}. Like {@link put}, the work is synchronous
+	 * under the hood; the promise resolves once the batch has been applied.
+	 *
+	 * @param entries - `[key, value]` pairs to store.
+	 * @param options - The put options (e.g. `transaction`).
+	 */
+	async putMany(entries: [Key, any][], options?: PutOptions & T): Promise<void> {
+		return this.store.putManySync(this._context, entries, options);
+	}
+
+	/**
 	 * Removes a value for the given key. If the key does not exist, it will
 	 * not error.
 	 *

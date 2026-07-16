@@ -257,6 +257,19 @@ struct TransactionHandle final : Closable, AsyncWorkHandle, std::enable_shared_f
 		std::shared_ptr<DBHandle> dbHandleOverride = nullptr
 	);
 
+	// Batched put. `keys` and `values` are each a flat buffer of `count` entries
+	// in the form [u32 LE length][bytes], repeated. All puts go into this
+	// transaction's write batch, routed to dbHandleOverride's column family (same
+	// override semantics as putSync). Applied in order; returns on first error.
+	rocksdb::Status putManySync(
+		const char* keys,
+		size_t keysLen,
+		const char* values,
+		size_t valuesLen,
+		uint32_t count,
+		std::shared_ptr<DBHandle> dbHandleOverride = nullptr
+	);
+
 	rocksdb::Status removeSync(
 		rocksdb::Slice& key,
 		std::shared_ptr<DBHandle> dbHandleOverride = nullptr

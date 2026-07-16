@@ -7,6 +7,7 @@
 #include "iterator/db_iterator_handle.h"
 #include "transaction/transaction_handle.h"
 #include "core/test_seam.h"
+#include "napi/helpers.h"
 #include "napi/macros.h"
 
 namespace rocksdb_js {
@@ -503,9 +504,71 @@ rocksdb::Status TransactionHandle::putSync(
 	return status;
 }
 
-/**
- * Remove a value using the specified database handle.
- */
+rocksdb::Status TransactionHandle::putManySync(
+	const char* keys,
+	size_t keysLen,
+	const char* values,
+	size_t valuesLen,
+	uint32_t count,
+	std::shared_ptr<DBHandle> dbHandleOverride
+) {
+	if (!this->txn) {
+		return rocksdb::Status::Aborted("Transaction is closed");
+	}
+
+	if (this->state != TransactionState::Pending) {
+		DEBUG_LOG("%p TransactionHandle::putManySync Transaction is not in pending state (state=%d)\n", this, this->state);
+		return rocksdb::Status::Aborted("Transaction is not in pending state");
+	}
+
+	// Snapshot-once, same as putSync — do it a single time for the whole batch,
+	// not per entry.
+	if (!this->disableSnapshot && !this->snapshotSet && this->dbHandle->descriptor->mode == DBMode::Pessimistic) {
+		this->snapshotSet = true;
+		this->txn->SetSnapshot();
+	}
+
+	std::shared_ptr<DBHandle> dbHandle = dbHandleOverride ? dbHandleOverride : this->dbHandle;
+	auto column = dbHandle->getColumnFamilyHandle();
+	const bool vt = dbHandle->enableVerificationTable;
+
+	size_t ko = 0;
+	size_t vo = 0;
+	for (uint32_t i = 0; i < count; i++) {
+		if (ko + 4 > keysLen) {
+			return rocksdb::Status::Aborted("putMany: keys buffer truncated (length prefix)");
+		}
+		uint32_t klen = readLE32(keys + ko);
+		ko += 4;
+		if (ko + klen > keysLen) {
+			return rocksdb::Status::Aborted("putMany: key overruns keys buffer");
+		}
+		rocksdb::Slice keySlice(keys + ko, klen);
+		ko += klen;
+
+		if (vo + 4 > valuesLen) {
+			return rocksdb::Status::Aborted("putMany: values buffer truncated (length prefix)");
+		}
+		uint32_t vlen = readLE32(values + vo);
+		vo += 4;
+		if (vo + vlen > valuesLen) {
+			return rocksdb::Status::Aborted("putMany: value overruns values buffer");
+		}
+		rocksdb::Slice valueSlice(values + vo, vlen);
+		vo += vlen;
+
+		rocksdb::Status status = this->txn->Put(column, keySlice, valueSlice);
+		if (!status.ok()) {
+			return status;
+		}
+
+		if (vt) {
+			this->lockVTSlot(dbHandle, keySlice);
+		}
+	}
+
+	return rocksdb::Status::OK();
+}
 rocksdb::Status TransactionHandle::removeSync(
 	rocksdb::Slice& key,
 	std::shared_ptr<DBHandle> dbHandleOverride

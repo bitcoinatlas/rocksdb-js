@@ -1,6 +1,7 @@
 #include <node_api.h>
 #include <algorithm>
 #include <sstream>
+#include "rocksdb/write_batch.h"
 #include "database/database.h"
 #include "database/db_handle.h"
 #include "iterator/db_iterator.h"
@@ -1532,6 +1533,120 @@ napi_value Database::PutSync(napi_env env, napi_callback_info info) {
 
 
 /**
+ * Batched put: one N-API call carrying many key/value pairs, applied in order.
+ *
+ * argv: (keysBuffer, valuesBuffer, count, txnId?)
+ *   keysBuffer / valuesBuffer — each a flat buffer of `count` entries in the
+ *   form [u32 LE length][bytes], repeated.
+ *
+ * With a transaction (txnId is a number) every put goes into that transaction's
+ * write batch, routed to THIS handle's column family (same override semantics as
+ * PutSync). Without a transaction the puts are applied atomically via a single
+ * WriteBatch. Motivation: collapse N boundary crossings into one for bulk index
+ * writes.
+ */
+napi_value Database::PutManySync(napi_env env, napi_callback_info info) {
+	NAPI_METHOD_ARGV(4);
+	NAPI_GET_BUFFER(argv[0], keys, "Keys buffer is required");
+	NAPI_GET_BUFFER(argv[1], values, "Values buffer is required");
+	UNWRAP_DB_HANDLE_AND_OPEN();
+	ACQUIRE_OPERATIONS_LOCK();
+
+	uint32_t count = 0;
+	NAPI_STATUS_THROWS(::napi_get_value_uint32(env, argv[2], &count));
+
+	const char* keysPtr = keys + keysStart;
+	size_t keysDataLen = keysEnd - keysStart;
+	const char* valuesPtr = values + valuesStart;
+	size_t valuesDataLen = valuesEnd - valuesStart;
+
+	napi_valuetype txnIdType;
+	NAPI_STATUS_THROWS(::napi_typeof(env, argv[3], &txnIdType));
+
+	rocksdb::Status status;
+
+	if (txnIdType == napi_number) {
+		uint32_t txnId;
+		NAPI_STATUS_THROWS(::napi_get_value_uint32(env, argv[3], &txnId));
+
+		auto txnHandle = (*dbHandle)->descriptor->transactionGet(txnId);
+		if (!txnHandle) {
+			std::string errorMsg = "PutMany failed: Transaction not found (txnId: " + std::to_string(txnId) + ")";
+			::napi_throw_error(env, nullptr, errorMsg.c_str());
+			NAPI_RETURN_UNDEFINED();
+		}
+
+		status = txnHandle->putManySync(
+			keysPtr,
+			keysDataLen,
+			valuesPtr,
+			valuesDataLen,
+			count,
+			*dbHandle
+		);
+	} else {
+		// Non-transactional: apply atomically with a single WriteBatch. VT write
+		// intents (if enabled) are held across the whole batch and released after,
+		// mirroring the single-key PutSync lock-before-write / settle-after pattern.
+		auto column = (*dbHandle)->getColumnFamilyHandle();
+		VerificationTable* vt = (*dbHandle)->enableVerificationTable
+			? DBSettings::getInstance().getVerificationTableRaw()
+			: nullptr;
+		uintptr_t dbPtr = reinterpret_cast<uintptr_t>((*dbHandle)->descriptor.get());
+		uint32_t cfId = column->GetID();
+
+		rocksdb::WriteBatch batch;
+		std::vector<std::pair<std::atomic<uint64_t>*, LockTracker*>> vtLocks;
+
+		size_t ko = 0;
+		size_t vo = 0;
+		for (uint32_t i = 0; i < count; i++) {
+			if (ko + 4 > keysDataLen) { status = rocksdb::Status::Aborted("putMany: keys buffer truncated (length prefix)"); break; }
+			uint32_t klen = rocksdb_js::readLE32(keysPtr + ko);
+			ko += 4;
+			if (ko + klen > keysDataLen) { status = rocksdb::Status::Aborted("putMany: key overruns keys buffer"); break; }
+			rocksdb::Slice keySlice(keysPtr + ko, klen);
+			ko += klen;
+
+			if (vo + 4 > valuesDataLen) { status = rocksdb::Status::Aborted("putMany: values buffer truncated (length prefix)"); break; }
+			uint32_t vlen = rocksdb_js::readLE32(valuesPtr + vo);
+			vo += 4;
+			if (vo + vlen > valuesDataLen) { status = rocksdb::Status::Aborted("putMany: value overruns values buffer"); break; }
+			rocksdb::Slice valueSlice(valuesPtr + vo, vlen);
+			vo += vlen;
+
+			if (vt) {
+				std::atomic<uint64_t>* vtSlot = vt->slotFor(dbPtr, cfId, keySlice);
+				LockTracker* vtTracker = vt->lockSlotForWrite(vtSlot, dbPtr);
+				vtLocks.emplace_back(vtSlot, vtTracker);
+			}
+
+			status = batch.Put(column, keySlice, valueSlice);
+			if (!status.ok()) { break; }
+		}
+
+		if (status.ok()) {
+			rocksdb::WriteOptions writeOptions;
+			writeOptions.disableWAL = (*dbHandle)->disableWAL;
+			status = (*dbHandle)->descriptor->db->Write(writeOptions, &batch);
+		}
+
+		for (auto& lock : vtLocks) {
+			vt->releaseWriteIntent(lock.first, lock.second);
+		}
+	}
+
+	if (!status.ok()) {
+		ROCKSDB_STATUS_CREATE_NAPI_ERROR(status, "PutMany failed");
+		::napi_throw(env, error);
+		return nullptr;
+	}
+
+	NAPI_RETURN_UNDEFINED();
+}
+
+
+/**
  * Removes a key from the RocksDB database.
  */
 napi_value Database::RemoveSync(napi_env env, napi_callback_info info) {
@@ -1750,6 +1865,7 @@ void Database::Init(napi_env env, napi_value exports) {
 		{ "populateVersion", nullptr, PopulateVersion, nullptr, nullptr, nullptr, napi_default, nullptr },
 		{ "purgeLogs", nullptr, PurgeLogs, nullptr, nullptr, nullptr, napi_default, nullptr },
 		{ "putSync", nullptr, PutSync, nullptr, nullptr, nullptr, napi_default, nullptr },
+		{ "putManySync", nullptr, PutManySync, nullptr, nullptr, nullptr, napi_default, nullptr },
 		{ "removeListener", nullptr, RemoveListener, nullptr, nullptr, nullptr, napi_default, nullptr },
 		{ "removeSync", nullptr, RemoveSync, nullptr, nullptr, nullptr, napi_default, nullptr },
 		{ "setDefaultValueBuffer", nullptr, SetDefaultValueBuffer, nullptr, nullptr, nullptr, napi_default, nullptr },

@@ -59,6 +59,7 @@ export type NativeTransaction = {
 	getSync(keyLengthOrKeyBuffer: number | Buffer): Buffer | number | undefined;
 	getTimestamp(): number;
 	putSync(key: Key, value: Buffer | Uint8Array, txnId?: number): void;
+	putManySync(keys: Buffer | Uint8Array, values: Buffer | Uint8Array, count: number, txnId?: number): void;
 	removeSync(key: Key): void;
 	setTimestamp(timestamp?: number): void;
 	useLog(name: string | number): TransactionLog;
@@ -316,6 +317,7 @@ export type NativeDatabase = {
 	purgeLogs(options?: PurgeLogsOptions & { includeEntryCounts?: false }): string[];
 	purgeLogs(options?: PurgeLogsOptions): string[] | PurgedLog[];
 	putSync(key: BufferWithDataView, value: any, txnId?: number): void;
+	putManySync(keys: BufferWithDataView | Buffer, values: BufferWithDataView | Buffer, count: number, txnId?: number): void;
 	removeListener(event: string | BufferWithDataView, callback: () => void): boolean;
 	removeSync(key: BufferWithDataView, txnId?: number): void;
 	// Provide a buffer that is used as the default/shared buffer for keys, where functions that provide a key can do so by assigning the key to the shared buffer and providing the length.
