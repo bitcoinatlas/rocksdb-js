@@ -1,3 +1,4 @@
+import type { BackupStreamOptions } from './backup-stream.js';
 import type { BackupOptions } from './backup.js';
 import { DBI, type DBITransactional } from './dbi.js';
 import type { BufferWithDataView, Encoder, EncoderFunction, Key } from './encoding.js';
@@ -31,6 +32,8 @@ import {
 	TransactionIsBusyError,
 } from './transaction.js';
 import { Encoder as MsgpackEncoder } from 'msgpackr';
+import { existsSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 import * as orderedBinary from 'ordered-binary';
 
 export type TransactionCallback<T> = (txn: Transaction, attempt: number) => T | PromiseLike<T>;
@@ -173,8 +176,69 @@ export class RocksDatabase extends DBI<DBITransactional> {
 	 * const id = await db.backup('/path/to/backups');
 	 * ```
 	 */
-	backup(backupDir: string, options?: BackupOptions): Promise<number> {
-		return this.store.backup(backupDir, options);
+	backup(backupDir: string, options?: BackupOptions): Promise<number>;
+	/**
+	 * Streams a consistent snapshot of the entire database to a `WritableStream`
+	 * as a tar archive, with no intermediate copy written to disk. Resolves once
+	 * the stream has been fully written and closed.
+	 *
+	 * Backpressure is honored end to end, so a slow consumer (e.g. a network or
+	 * S3 upload) paces the backup rather than buffering it in memory. The archive
+	 * unpacks with any tar tool into a directory that opens as a RocksDB database.
+	 *
+	 * @example
+	 * ```typescript
+	 * const file = await fetch(uploadUrl, { method: 'PUT', body: stream });
+	 * await db.backup(stream); // `stream` is the request's WritableStream
+	 * ```
+	 */
+	backup(stream: WritableStream<Uint8Array>, options?: BackupStreamOptions): Promise<void>;
+	backup(
+		target: string | WritableStream<Uint8Array>,
+		options?: BackupOptions | BackupStreamOptions
+	): Promise<number | void> {
+		if (typeof target === 'string') {
+			return this.store.backup(target, options as BackupOptions);
+		}
+		return this.store.backup(target, options as BackupStreamOptions);
+	}
+
+	/**
+	 * Creates a hardlinked, point-in-time, fully independent copy of the entire
+	 * database (all column families) at `targetPath` and resolves once written.
+	 *
+	 * Unlike a backup, a checkpoint is a normal, writable sibling database: open
+	 * it with {@link RocksDatabase.open} and it diverges independently from the
+	 * source. SST and blob files are hardlinked when `targetPath` is on the same
+	 * filesystem as the database and copied otherwise (other files such as the
+	 * MANIFEST are always copied), so the operation is near-instant on the same
+	 * filesystem. The memtable is flushed so the checkpoint includes the latest
+	 * writes even when the WAL is disabled.
+	 *
+	 * Parent directories are created as needed. `targetPath` itself must not
+	 * already exist (RocksDB creates the checkpoint directory) and rejects with
+	 * `Create checkpoint failed: target path exists` if it does. The caller is
+	 * responsible for eventual cleanup of the directory.
+	 *
+	 * @example
+	 * ```typescript
+	 * const db = RocksDatabase.open('/path/to/database');
+	 * await db.createCheckpoint('/path/to/checkpoint');
+	 * const branch = RocksDatabase.open('/path/to/checkpoint');
+	 * ```
+	 */
+	createCheckpoint(targetPath: string): Promise<void> {
+		return new Promise((resolve, reject) => {
+			if (existsSync(targetPath)) {
+				reject(new Error('Create checkpoint failed: target path exists'));
+				return;
+			}
+			// Create parent directories as needed (a throw here rejects the promise),
+			// then hand off to the native worker synchronously so it registers its
+			// in-flight operation before this call returns.
+			mkdirSync(dirname(targetPath), { recursive: true });
+			this.store.db.createCheckpoint(resolve, reject, targetPath);
+		});
 	}
 
 	/**

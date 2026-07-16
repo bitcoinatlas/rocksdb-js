@@ -1,5 +1,4 @@
 #include <chrono>
-#include <cstdlib>
 #include <sstream>
 #include <thread>
 #include "database/database.h"
@@ -7,24 +6,10 @@
 #include "database/db_settings.h"
 #include "iterator/db_iterator_handle.h"
 #include "transaction/transaction_handle.h"
+#include "core/test_seam.h"
 #include "napi/macros.h"
 
 namespace rocksdb_js {
-
-/**
- * Read-once test seam: returns milliseconds to sleep after
- * waitForAsyncWorkCompletion() in close(), widening the window between PATH A
- * (descriptor close on env M) and PATH B (commit complete callback on env W)
- * so the close-vs-commit double-free race (HarperFast/harper#1370) reproduces
- * deterministically. Zero in production (env var not set).
- */
-static int txnCloseTestDelayMs() {
-	static const int delayMs = [] {
-		const char* value = ::getenv("ROCKSDB_JS_TXN_CLOSE_DELAY_MS");
-		return value ? ::atoi(value) : 0;
-	}();
-	return delayMs;
-}
 
 /**
  * Creates a new RocksDB transaction, enables snapshots, and sets the
@@ -43,8 +28,8 @@ TransactionHandle::TransactionHandle(
 	coordinatedRetry(false),
 	state(TransactionState::Pending),
 	txn(nullptr),
-	committedPosition(0, 0),
-	envThreadId(std::this_thread::get_id()) {
+	envThreadId(std::this_thread::get_id()),
+	committedPosition(0, 0) {
 	this->resetTransaction();
 	this->id = this->dbHandle->descriptor->transactionGetNextId();
 
@@ -100,6 +85,23 @@ TransactionHandle::~TransactionHandle() {
 void TransactionHandle::addLogEntry(std::unique_ptr<TransactionLogEntry> entry) {
 	DEBUG_LOG("%p TransactionHandle::addLogEntry Adding log entry to store \"%s\" for transaction %u (size=%zu)\n",
 		this, entry->store->name.c_str(), this->id, entry->size);
+
+	// #668 (defense in depth): the write-ahead log is write-once per transaction. If
+	// committedPosition is already set, this transaction's batch was durably written by a
+	// prior commit attempt (committedPosition survives resetTransaction). A commit that
+	// returned IsBusy is retried by re-running the transaction body to re-drive the RocksDB
+	// commit; re-staging the log here would write the records a second time at a new
+	// position, orphaning the original (commitFinished is gated on !IsBusy, so the original
+	// is never finalized) and pinning the committed-read watermark at it forever — silent
+	// committed-read truncation (HarperFast/harper-pro#426). Higher layers are expected to
+	// suppress the re-log on retry (e.g. harper's DatabaseTransaction.isRetry), but enforce
+	// write-once here too so a stray re-stage from any caller cannot corrupt the watermark.
+	if (this->committedPosition.logSequenceNumber > 0) {
+		DEBUG_LOG("%p TransactionHandle::addLogEntry Skipping re-stage on retry for transaction %u "
+			"(WAL already written at seq %u)\n",
+			this, this->id, this->committedPosition.logSequenceNumber);
+		return;
+	}
 
 	// check if this transaction is already bound to a different log store
 	auto currentBoundStore = this->boundLogStore.lock();
@@ -213,9 +215,9 @@ void TransactionHandle::close() {
 	// This window is real in production (PATH B fires after waitForAsyncWorkCompletion
 	// unblocks); the seam makes it wide enough to reproduce deterministically.
 	// Noop in production.
-	const int testDelayMs = txnCloseTestDelayMs();
-	if (testDelayMs > 0) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(testDelayMs));
+	const int closeDelayMs = testDelayMs("ROCKSDB_JS_TXN_CLOSE_DELAY_MS");
+	if (closeDelayMs > 0) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(closeDelayMs));
 	}
 
 	// if the transaction was aborted (either via an error, explicit abort, or was pending), we need

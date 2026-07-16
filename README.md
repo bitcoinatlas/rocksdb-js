@@ -996,6 +996,40 @@ Note: If the `callback` throws an error, Node.js suppress the error. Node.js 18.
 `--force-node-api-uncaught-exceptions-policy` flag which will cause errors to emit the
 `'uncaughtException'` event. Future Node.js releases will enable this flag by default.
 
+## Exclusive File Locking
+
+`rocksdb-js` includes helper functions for creating lock files and releasing them using native APIs.
+This can be used to prevent multiple processes from concurrently accessing a resource. The lock is
+automatically released when the process exits.
+
+### `tryFileLock(file: string): number`
+
+Attempts to acquire an exclusive lock on the given file, creating it if it doesn't exist. Returns a
+non-zero token to pass to `fileLockRelease` if the lock was acquired, or `0` if another holder — in
+any process, container, or worker thread — currently has it. Throws if the file's parent directory
+is missing or on a hard error.
+
+```typescript
+import { tryFileLock } from '@harperfast/rocksdb-js';
+
+const token = tryFileLock('/path/to/lock');
+if (token) {
+	console.log('lock acquired');
+} else {
+	console.log('lock not available, another process is holding it');
+}
+```
+
+### `fileLockRelease(token: number): void`
+
+Releases the file lock for the given token.
+
+```typescript
+import { fileLockRelease } from '@harperfast/rocksdb-js';
+
+fileLockRelease(token);
+```
+
 ## Verification Table
 
 The verification table is a process-global, fixed-size structure that lets an application cheaply
@@ -1385,15 +1419,56 @@ import { versions } from '@harperfast/rocksdb-js';
 console.log(versions); // { "rocksdb": "10.10.1", "rocksdb-js": "0.1.2" }
 ```
 
+## Checkpoints
+
+### `db.createCheckpoint(targetPath: string): Promise<void>`
+
+Creates a [checkpoint](https://github.com/facebook/rocksdb/wiki/Checkpoints) — a point-in-time,
+fully independent copy of the entire database (all column families) at `targetPath` — and resolves
+once written. Unlike a backup, a checkpoint is a normal, writable database: open it as a new
+`RocksDatabase` and it diverges independently from the source.
+
+SST and blob files are **hard-linked** when `targetPath` is on the **same filesystem** as the
+database, and **copied** otherwise; other files (such as the `MANIFEST`) are always copied. As a
+result the operation is near-instant on the same filesystem and as costly as a full copy across
+filesystems. The memtable is flushed so the checkpoint includes the latest writes even when the
+WAL is disabled.
+
+Parent directories are created as needed. `targetPath` itself must not already exist — RocksDB
+creates the checkpoint directory — and the call rejects with `Create checkpoint failed: target
+path exists` if it does (other failures, such as a full disk, surface the RocksDB status message).
+The caller is responsible for opening the checkpoint and for eventually deleting the directory.
+
+```typescript
+const db = RocksDatabase.open('/path/to/database');
+await db.createCheckpoint('/path/to/checkpoint');
+
+// The checkpoint is a normal, writable database.
+const branch = RocksDatabase.open('/path/to/checkpoint');
+```
+
 ## Backups
 
 Backups use RocksDB's `BackupEngine` to capture consistent, incremental, checksum-verified
 snapshots of a database. A backup covers the **entire database** — every column family, the
 manifest, and (by default) the write-ahead log — so it is not scoped to an individual `Store`.
 
+A backup can be written to a local **directory** (incremental, with a management API) or streamed to
+a **`WritableStream`** as a tar archive with no intermediate copy on disk. See
+[docs/backups.md](docs/backups.md) for a full guide covering both modes, restore, checkpoints, and
+caveats.
+
 Creating a backup is an instance method (`db.backup()`) because it needs a live database. The
 remaining operations act on a backup directory and do not require an open database, so they are
 grouped under the `backups` namespace export.
+
+> **Only one backup per directory may be in-flight at a time.** RocksDB has no cross-engine lock on
+> a backup directory, so the writing operations — `db.backup()`, `backups.delete()`, and
+> `backups.purge()` — take an on-disk lock (a `.backup.lock` file) for the directory. A second
+> writing operation on the same directory, whether from the same process, a `worker_thread`, or a
+> separate process, **rejects** with a "locked" error rather than corrupting the backup; retry once
+> the in-flight operation finishes. Operations on _different_ directories run in parallel, and the
+> read-only operations (`list`, `verify`, `restore`) are not locked.
 
 ```typescript
 import { RocksDatabase, backups } from '@harperfast/rocksdb-js';
@@ -1422,15 +1497,53 @@ const id = await db.backup('/path/to/backups', { metadata: 'nightly-2026-06-04' 
 
 `BackupOptions`:
 
-| Option                    | Type      | Default                | Description                                                           |
-| ------------------------- | --------- | ---------------------- | --------------------------------------------------------------------- |
-| `flushBeforeBackup`       | `boolean` | `true` if WAL disabled | Flush the memtable before backing up.                                 |
-| `metadata`                | `string`  | `''`                   | Application metadata stored with the backup, returned by `list()`.    |
-| `shareTableFiles`         | `boolean` | `true`                 | Share files between backups to enable incremental backups.            |
-| `shareFilesWithChecksum`  | `boolean` | `true`                 | Distinguish shared files by checksum to avoid cross-database clashes. |
-| `backupLogFiles`          | `boolean` | `true`                 | Include write-ahead log files in the backup.                          |
-| `sync`                    | `boolean` | `true`                 | `fsync` backup files for crash consistency.                           |
-| `maxBackgroundOperations` | `number`  | `1`                    | Number of background threads used to copy files.                      |
+| Option                    | Type      | Default                | Description                                                                          |
+| ------------------------- | --------- | ---------------------- | ------------------------------------------------------------------------------------ |
+| `backupLogFiles`          | `boolean` | `true`                 | Include write-ahead log files in the backup.                                         |
+| `flushBeforeBackup`       | `boolean` | `true` if WAL disabled | Flush the memtable before backing up.                                                |
+| `maxBackgroundOperations` | `number`  | `1`                    | Number of background threads used to copy files.                                     |
+| `metadata`                | `string`  | `''`                   | Application metadata stored with the backup, returned by `list()`.                   |
+| `shareFilesWithChecksum`  | `boolean` | `true`                 | Distinguish shared files by checksum to avoid cross-database clashes.                |
+| `shareTableFiles`         | `boolean` | `true`                 | Share files between backups to enable incremental backups.                           |
+| `sync`                    | `boolean` | `true`                 | `fsync` backup files (including the transaction log snapshot) for crash consistency. |
+| `transactionLogs`         | `boolean` | `false`                | Snapshot the transaction log store into `<backupDir>/transaction_logs/<backupId>/`.  |
+
+When `transactionLogs` is enabled, the log snapshot is staged and atomically renamed into
+`<backupDir>/transaction_logs/<backupId>/` only after every file has been copied (and fsynced, per
+`sync`), so a crash mid-backup can never leave a partial log snapshot for a listed backup id — a
+backup either has its complete snapshot or none. The snapshot is captured just after the RocksDB
+engine snapshot, so restored logs may run slightly ahead of the restored key-value data (never
+behind it), which is safe for redo-style logs replayed against the restored data.
+
+### `db.backup(stream: WritableStream<Uint8Array>, options?: BackupStreamOptions): Promise<void>`
+
+Streams a consistent snapshot of the entire database to `stream` as a tar archive, with **no
+intermediate copy written to disk**, and resolves once the stream has been fully written and closed.
+Backpressure is honored end to end, so a slow consumer (e.g. an upload) paces the backup rather than
+buffering it in memory. The archive unpacks with any tar tool into a directory that opens as a
+RocksDB database.
+
+```typescript
+import { createWriteStream } from 'node:fs';
+import { Writable } from 'node:stream';
+
+await db.backup(Writable.toWeb(createWriteStream('/path/to/backup.tar')));
+// Restore: `tar -xf backup.tar -C /restored`, then open '/restored'.
+
+// Or gzip it (`tar -xzf backup.tar.gz` to restore):
+await db.backup(Writable.toWeb(createWriteStream('/path/to/backup.tar.gz')), { gzip: true });
+```
+
+`BackupStreamOptions`:
+
+| Option              | Type      | Default                | Description                                                         |
+| ------------------- | --------- | ---------------------- | ------------------------------------------------------------------- |
+| `flushBeforeBackup` | `boolean` | `true` if WAL disabled | Flush the memtable before streaming.                                |
+| `gzip`              | `boolean` | `false`                | Gzip-compress the archive, producing a `.tar.gz` instead of `.tar`. |
+
+Stream backups are always full snapshots (no incremental sharing), have no `backups.*` management
+API, and **cannot be resumed** — a failed transfer must be restarted from the beginning. See
+[docs/backups.md](docs/backups.md#stream-backups) for details.
 
 ### `backups.restore(backupDir: string, dbDir: string, options?: RestoreOptions): Promise<void>`
 

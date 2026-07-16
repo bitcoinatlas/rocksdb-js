@@ -1,3 +1,4 @@
+import { type BackupStreamOptions, backupToStream } from './backup-stream.js';
 import type { BackupOptions } from './backup.js';
 import { DBIterator, type DBIteratorValue } from './dbi-iterator.js';
 import type { DBITransactional, IteratorOptions, RangeOptions } from './dbi.js';
@@ -24,7 +25,6 @@ import {
 } from './load-binding.js';
 import { parseDuration } from './util.js';
 import { ExtendedIterable } from '@harperfast/extended-iterable';
-import { mkdir } from 'node:fs/promises';
 
 const {
 	ONLY_IF_IN_MEMORY_CACHE_FLAG,
@@ -433,9 +433,24 @@ export class Store {
 	 * const id = await db.backup('/path/to/backups');
 	 * ```
 	 */
-	async backup(backupDir: string, options?: BackupOptions): Promise<number> {
-		await mkdir(backupDir, { recursive: true });
-		return new Promise((resolve, reject) => this.db.backup(resolve, reject, backupDir, options));
+	async backup(backupDir: string, options?: BackupOptions): Promise<number>;
+	async backup(stream: WritableStream<Uint8Array>, options?: BackupStreamOptions): Promise<void>;
+	async backup(
+		target: string | WritableStream<Uint8Array>,
+		options?: BackupOptions | BackupStreamOptions
+	): Promise<number | void> {
+		// Duck-type rather than `instanceof WritableStream` so a stream from a
+		// different realm (or a polyfill) still routes to the streaming path.
+		if (typeof target !== 'string' && typeof target?.getWriter === 'function') {
+			return backupToStream(this.db, target, options as BackupStreamOptions);
+		}
+		// The native side creates the directory (with missing parents) and holds
+		// the on-disk single-writer lock for the duration of the backup — see
+		// `runCreateBackup` in `src/binding/database/backup.cpp` and
+		// `withBackupDirLock`. Rejects if the directory is already locked.
+		return new Promise((resolve, reject) =>
+			this.db.backup(resolve, reject, target as string, options as BackupOptions)
+		);
 	}
 
 	/**

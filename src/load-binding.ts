@@ -253,12 +253,26 @@ export type NativeDatabase = {
 		backupDir: string,
 		options?: BackupOptions
 	): void;
+	// `emit` is invoked once per file header (kind 0: name, size, mtime) and once
+	// per payload chunk (kind 1: Buffer). It must return a promise; native awaits
+	// it before producing the next event (backpressure), and a rejection aborts.
+	backupStream(
+		resolve: ResolveCallback<void>,
+		reject: RejectCallback,
+		emit: (kind: number, data: string | Uint8Array, size: number, mtime: number) => Promise<void>,
+		options?: { flushBeforeBackup?: boolean; transactionLogs?: boolean }
+	): void;
 	clear(resolve: ResolveCallback<void>, reject: RejectCallback): void;
 	clearSync(): void;
 	close(): void;
 	compact(resolve: ResolveCallback<void>, reject: RejectCallback, start?: Key, end?: Key): void;
 	compactSync(start?: Key, end?: Key): void;
 	columns: string[];
+	createCheckpoint(
+		resolve: ResolveCallback<void>,
+		reject: RejectCallback,
+		targetPath: string
+	): void;
 	destroy(): void;
 	drop(resolve: ResolveCallback<void>, reject: RejectCallback): void;
 	dropSync(): void;
@@ -516,6 +530,23 @@ export const coolTransactionLogs: () => { maps: number; bytes: number } =
  * the underlying mapping rather than leaving it retained.
  */
 export const transactionLogMapCount: () => number = binding.transactionLogMapCount;
+
+/**
+ * Creates a native file lock using the specified file path (`flock` on POSIX,
+ * `LockFileEx` on Windows). Returns an opaque non-zero token to pass to
+ * `fileLockRelease`, or `0` if another holder — in any process, container, or
+ * worker thread — currently has it. Throws if `file` is missing or on a hard
+ * error. The OS handle is owned entirely in native code (no fd crosses into
+ * JS), and the kernel releases the lock when the handle closes, including on
+ * process death.
+ */
+export const tryFileLock: (file: string) => number = binding.tryFileLock;
+
+/**
+ * Releases a file lock acquired via `tryFileLock`. A no-op for
+ * token `0` or an unknown token.
+ */
+export const fileLockRelease: (token: number) => void = binding.fileLockRelease;
 
 // Module-level backup management functions. These operate on a backup directory
 // and do not require an open database. Wrapped by the `backups` namespace in
