@@ -1,3 +1,10 @@
+**Bitcoin Atlas Additions**
+```
+- bloom/ribbon filter options/knobs
+- putMany for putting multiple entries with a single ffi call
+```
+
+
 # rocksdb-js
 
 A Node.js binding for the RocksDB library.
