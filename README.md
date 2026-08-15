@@ -4,6 +4,8 @@
 - putMany for putting multiple entries with a single ffi call
 ```
 
+UPDATE: Not used anymore in the main project.
+
 
 # rocksdb-js
 
